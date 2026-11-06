@@ -2302,88 +2302,144 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-/* CamaraIA · demo pública de revisión. Datos ficticios, sin acceso a equipos. */
+/* CamaraIA v4: catálogo autorizado, dos resultados automáticos, una sola emisión. */
 (function(global){
-  'use strict';
-  const KEY='camaraia-public-review-v3', BACKUP=KEY+'-backup', REVIEW=KEY+'-comments';
-  const copy=value=>JSON.parse(JSON.stringify(value));
-  const iso=()=>new Date().toISOString().replace(/\.\d{3}Z$/,'Z');
-  const fail=message=>{throw new Error(message)};
-  const parts=Array.from({length:6},(_,i)=>({number:'NP-DEMO-00'+(i+1),description:'Modelo de demostración '+String.fromCharCode(65+i)}));
-  let storage;
-  try{storage=global.localStorage;const test=KEY+'-check';storage.setItem(test,'ok');storage.removeItem(test)}catch(e){
-    storage=null;
+ 'use strict';
+ const KEY='camaraia-review-v4',BACKUP=KEY+'-backup',REVIEW='camaraia-public-review-v3-comments';
+ const parts=[
+  {number:'203.143-54',description:'38N FCU BEZEL COVER GR'},
+  {number:'203.812-54',description:'38N ACU BEZEL COVER GR'},
+  {number:'203.812-06',description:'38N ACU BEZEL COVER GR'},
+  {number:'203.143-06',description:'38N FCU BEZEL COVER GR'},
+  {number:'218.475-02',description:'38N FCU BEZEL COVER GR'},
+  {number:'218.475-52',description:'38N FCU BEZEL COVER GR'}
+ ];
+ const clone=x=>JSON.parse(JSON.stringify(x)),iso=()=>new Date().toISOString();
+ const fail=message=>{throw new Error(message)};
+ let storage=null,memory=null,memoryReview=null;
+ try{storage=global.localStorage;storage.setItem(KEY+'-check','1');storage.removeItem(KEY+'-check')}catch(e){storage=null}
+ function localDate(date=new Date()){
+  const values=new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Mexico_City',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date);
+  return Object.fromEntries(values.filter(v=>v.type!=='literal').map(v=>[v.type,v.value]));
+ }
+ function suggest(s,shift=1){const d=localDate(),day=new Date(Date.UTC(+d.year,+d.month-1,+d.day));day.setUTCDate(day.getUTCDate()+4-(day.getUTCDay()||7));const start=new Date(Date.UTC(day.getUTCFullYear(),0,1));const week=Math.ceil((((day-start)/86400000)+1)/7);const base=d.year.slice(-2)+String(week).padStart(2,'0')+d.day+String(shift).padStart(2,'0');let i=1;while(s.lots.some(l=>l.code===base+'-'+String(i).padStart(2,'0')))i++;return base+'-'+String(i).padStart(2,'0')}
+ function fresh(){
+  const lot={id:1,code:suggest({lots:[]}),part:parts[0].number,shift:1,target:770,status:'OPEN',created:iso()};
+  return {schema:4,pieceCounter:0,labelCounter:0,cycleCounter:0,resultCounter:0,lastResult:null,lot,lots:[clone(lot)],pieces:[],jobs:[],cycle:null,lastCycle:null,auto:{running:true,stage:'ARRIVE',due:Date.now()+1200,remaining:3,waits:0},alarm:'',events:[],scenario:'OK',label:{width:10,height:10,dpi:600,printer:'SIMULATED'},connection:{ready:true,status:'ONLINE'}}
+ }
+ function load(){let raw=storage?storage.getItem(KEY):memory;let s;try{s=raw?JSON.parse(raw):fresh()}catch(e){fail('No se pudieron leer los datos de demostración. Reinicia el escenario.')}if(s.schema!==4)fail('Versión de datos no compatible.');return s}
+ function save(s){const raw=JSON.stringify(s);if(storage){try{storage.setItem(KEY,raw)}catch(e){fail('No se pudo guardar la demostración. Descarga tus observaciones antes de reiniciar.')}}else memory=raw}
+ function event(s,kind,data={}){s.events.unshift({id:(s.events[0]?.id||0)+1,time:iso(),kind,...data});s.events=s.events.slice(0,80)}
+ function idle(s){if(s.cycle)fail('La pieza actual debe terminar o quedar registrada como retenida antes de continuar.')}
+ function activeJob(s){return s.cycle?.piece_id?s.jobs.find(j=>j.piece_id===s.cycle.piece_id):null}
+ function findPiece(s,id){const p=s.pieces.find(p=>p.id===+id);if(!p)fail('No existe esa pieza.');return p}
+ function block(s,message){s.alarm=message;if(s.cycle)s.cycle.phase=s.cycle.piece_id?'PRINT_FAILED':'RETAINED';if(s.auto)s.auto.running=false;event(s,'BLOQUEO',{message})}
+ function dataFor(s,serial,labelSerial){const d=localDate();return {numero_parte:s.lot.part,lote:s.lot.code,serie_pieza:serial,serie_etiqueta:labelSerial,fecha_hora:`${d.year}-${d.month}-${d.day} ${d.hour}:${d.minute}`,turno:s.lot.shift}}
+ function encode(d){const time=d.fecha_hora.replace(/[- :]/g,'');return `P:${d.numero_parte} L:${d.lote} S:${d.serie_pieza} E:${d.serie_etiqueta} F:${time} T:${d.turno}`}
+ function layout(text,width=10,height=10,dpi=600){
+  if(!(width>=10&&width<=100&&height>=10&&height<=100)||![300,600].includes(+dpi))fail('Dimensiones o resolución de prueba inválidas.');
+  if(!/^[0-9A-Z $%*+./:-]+$/.test(text))fail('El QR compacto solo admite letras mayúsculas, números y separadores definidos.');
+  const qr=qrcode(0,'M');qr.addData(text,'Alphanumeric');qr.make();const n=qr.getModuleCount(),total=n+8,available=Math.min(width,height)-.8;
+  const dots=Math.floor(available*dpi/25.4/total),module=dots*25.4/dpi;
+  if(module<.2)fail('Estos datos no caben con el margen de lectura definido. Para 10 × 10 mm usa el patrón de 600 dpi o acorta el lote.');
+  const side=total*module,x0=(width-side)/2,y0=(height-side)/2,paths=[];for(let y=0;y<n;y++)for(let x=0;x<n;x++)if(qr.isDark(y,x))paths.push(`M${x+4},${y+4}h1v1h-1z`);
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}" role="img" aria-label="QR de identificación"><rect width="${width}" height="${height}" fill="white"/><path transform="translate(${x0},${y0}) scale(${module})" d="${paths.join('')}" fill="black" shape-rendering="crispEdges"/></svg>`;
+  return {svg,modules:n,quiet_zone:4,dots_per_module:dots,dpi,code_mm:side};
+ }
+ function validateLabel(s){return layout(encode(dataFor(s,'DP000000001','DE000000001')),s.label.width,s.label.height,s.label.dpi)}
+ function begin(s){idle(s);if(!s.lot)fail('Selecciona parte y lote antes de comenzar.');if(s.alarm||!s.connection.ready)fail('Primero resuelve el bloqueo de la estación.');if(s.pieces.length>=100)fail('El escenario de revisión llegó a 100 piezas. Reinicia solo los datos de demostración.');validateLabel(s);const id='C'+String(++s.cycleCounter).padStart(6,'0');s.cycle={id,phase:'FACE1',part:s.lot.part,lot_id:s.lot.id,first:null,second:null,piece_id:null,created:iso()};s.lastCycle=null;event(s,'ENTRADA_PIEZA',{cycle_id:id,part:s.lot.part,lot:s.lot.code})}
+ function receive(s,face,verdict,cycleId,sequence){
+  if(!s.cycle||cycleId!==s.cycle.id){event(s,'RESULTADO_FUERA_DE_PIEZA',{cycle_id:cycleId});return}
+  const seq=sequence===undefined?(s.resultCounter+1)%32768:+sequence;
+  if(!Number.isInteger(seq)||seq<0||seq>32767)fail('Contador inválido.');
+  const record={sequence:seq,face,verdict,cycle_id:cycleId,time:iso()};
+  event(s,'CAMARA_RESULTADO_SIMULADO',{...record,message:`Cara ${face}: ${verdict==='OK'?'terminada':'en proceso'}`});
+  if(s.lastResult){const delta=(seq-s.lastResult.sequence+32768)%32768;if(delta===0){if(s.lastResult.cycle_id===cycleId&&s.lastResult.face===face&&s.lastResult.verdict===verdict)event(s,'DUPLICADO_IGNORADO',{sequence:seq});else block(s,'El mismo resultado llegó con datos distintos.');return}if(delta!==1){s.resultCounter=seq;s.lastResult=record;block(s,'Se perdió la continuidad de datos de cámara. Pieza retenida.');return}}
+  s.resultCounter=seq;s.lastResult=record;
+  if(s.alarm||['PRINT_FAILED','RETAINED','COMPLETE'].includes(s.cycle.phase))return;
+  if(verdict!=='OK'){event(s,'ENSAMBLE_EN_PROCESO',{face,message:'Se conserva el OK del lado que ya está terminado.'});return}
+  const field=face===1?'first':'second';
+  if(s.cycle[field]){event(s,'LADO_YA_TERMINADO',{face,cycle_id:cycleId});return}
+  s.cycle[field]=record;
+  event(s,'LADO_TERMINADO',{face,cycle_id:cycleId,message:'OK conservado para este ensamble.'});
+  if(!s.cycle.first||!s.cycle.second){s.cycle.phase=s.cycle.first?'FACE2':'FACE1';return}
+  if(s.jobs.some(j=>j.cycle_id===cycleId))return;
+  const serial='DP'+String(s.pieceCounter+1).padStart(9,'0'),labelSerial='DE'+String(s.labelCounter+1).padStart(9,'0');
+  const data=dataFor(s,serial,labelSerial),qr=encode(data),image=layout(qr,10,10,600);
+  const piece={id:++s.pieceCounter,serial,label_serial:labelSerial,origin:'SIM',status:'PENDING',created:iso(),released:null,part:s.lot.part,lot:s.lot.code,lot_id:s.lot.id,shift:s.lot.shift,cycle_id:cycleId,qr_data:data,qr,svg:image.svg,layout:{...image,svg:undefined},width:10,height:10};
+  s.labelCounter++;s.pieces.push(piece);
+  s.jobs.push({id:s.labelCounter,piece_id:piece.id,label_serial:labelSerial,cycle_id:cycleId,status:'PENDING',attempts:0,emissions:0,created:iso(),due:Date.now()+1000,error:''});
+  s.cycle.piece_id=piece.id;s.cycle.phase='PRINT_PENDING';
+  event(s,'ENSAMBLE_TERMINADO',{cycle_id:cycleId,serial,label_serial:labelSerial,message:'Ambos lados terminados: emisión automática de una etiqueta.'});
+ }
+ function depart(s,cycleId){
+  const c=s.cycle;if(!c||c.id!==cycleId)return;
+  if(c.phase!=='COMPLETE'){block(s,'Salida sin etiqueta confirmada. Conservar pieza para revisión.');return}
+  s.lastCycle=clone(c);s.cycle=null;event(s,'SALIDA_PIEZA',{cycle_id:cycleId,message:'La detección de otra pieza prepara un ensamble nuevo.'});
+ }
+ function tick(s){
+  const job=activeJob(s);
+  if(job?.status==='PENDING'&&Date.now()>=job.due&&s.cycle?.phase==='PRINT_PENDING'&&!s.alarm){
+   const c=s.cycle,p=findPiece(s,job.piece_id);
+   if(!(c.id===job.cycle_id&&c.first?.verdict==='OK'&&c.second?.verdict==='OK'&&job.attempts===0&&job.emissions===0)){job.status='VOID';block(s,'Emisión no autorizada para este ensamble.');return}
+   job.attempts=1;
+   if(s.scenario==='PRINT_ERROR'){job.status='FAILED';job.error='Impresión fallida o salida sin confirmar. No se habilita otra impresión.';block(s,job.error);return}
+   job.status='PRINTED';job.emissions=1;job.printed_at=iso();p.status='RELEASED';p.released=job.printed_at;
+   c.phase='COMPLETE';c.serial=p.serial;c.label_serial=p.label_serial;c.completed=iso();s.lastCycle=clone(c);
+   event(s,'ETIQUETA_EMITIDA_SIMULADA',{serial:p.serial,label_serial:p.label_serial,cycle_id:c.id,quantity:1});
   }
-  let memory=null, memoryReview=null;
-  function fresh(){return {schema:3,station:Math.random().toString(16).slice(2,8).toUpperCase().padEnd(6,'0'),counter:0,sequence:0,lastResult:null,lot:null,lots:[],pieces:[],jobs:[],cycle:null,alarm:'',events:[],failNext:false,reconnectAt:null,connection:{status:'ONLINE',ready:true,session:'DEMO',model:'Escenario ficticio, sin cámara',endpoint:'Demostración en navegador'},label:{width:20,height:20,printer:'SIMULATED'}}}
-  function load(){let raw;if(storage)raw=storage.getItem(KEY);else raw=memory;let value;try{value=raw?JSON.parse(raw):fresh()}catch(e){fail('No se pudieron leer los datos de esta demo. Usa Reiniciar demo para comenzar otro escenario.')}if(value.schema!==3)fail('Versión de datos no compatible. Reinicia el escenario.');return value}
-  function save(s){const json=JSON.stringify(s);if(storage){try{storage.setItem(KEY,json)}catch(e){fail('No se pudo guardar en este navegador. Descarga tus comentarios y reinicia la demo.')}}else memory=json}
-  function event(s,kind,data={}){s.events.unshift({id:s.events.length?s.events[0].id+1:1,time:iso(),kind,...data});s.events=s.events.slice(0,60)}
-  function pending(s){return s.jobs.find(j=>j.status!=='CONFIRMED')||null}
-  function idle(s){if(s.cycle||pending(s))fail('Termina o cancela la pieza actual y resuelve la etiqueta pendiente primero.')}
-  function fault(s,message){s.alarm=message;if(s.cycle&&!s.cycle.piece_id){s.cycle.phase='RECOVERY';s.cycle.armed=false}event(s,'ALERTA',{message})}
-  function tick(s){let changed=false;if(s.reconnectAt&&Date.now()>=s.reconnectAt){s.connection.status='ONLINE';s.connection.ready=true;s.reconnectAt=null;event(s,'DEMO_RESTAURADA',{message:'Origen simulado disponible; revisar el ciclo antes de continuar.'});changed=true}for(const j of s.jobs){if(j.status==='PENDING'&&Date.now()>=j.due){const error=j.mode==='SIMULATED'&&s.failNext;j.attempts++;j.status=error?'ERROR':j.mode==='SIMULATED'?'READY_SIM':'READY_BROWSER';j.error=error?'Sin etiquetas (falla simulada).':'';if(error)s.failNext=false;if(s.cycle&&s.cycle.piece_id===j.piece_id)s.cycle.phase=error?'PRINT_ERROR':'PRINT_READY';event(s,error?'IMPRESION_ERROR':'ETIQUETA_LISTA',{job_id:j.id,status:j.status});changed=true}}return changed}
-  function qrPayload(s,serial){return JSON.stringify({serie:serial,parte:s.lot.part,lote:s.lot.code,fecha:iso(),turno:s.lot.shift,origen:'DEMO_WEB',prueba:true})}
-  function svg(qrPayload,width,height){width=Number(width);height=Number(height);if(!(width>=10&&width<=100&&height>=10&&height<=100))fail('Las dimensiones deben estar entre 10 y 100 mm.');const qr=qrcode(0,'M');qr.addData(qrPayload,'Byte');qr.make();const count=qr.getModuleCount(),side=Math.min(width,height),scale=side/(count+8);if(scale<.25)fail('El QR queda demasiado denso. Aumenta las dimensiones; prueba 20 × 20 mm.');const paths=[];for(let y=0;y<count;y++)for(let x=0;x<count;x++)if(qr.isDark(y,x))paths.push(`M${x+4},${y+4}h1v1h-1z`);return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}" role="img" aria-label="QR de identificación"><rect width="${width}" height="${height}" fill="white"/><path transform="translate(${(width-side)/2},${(height-side)/2}) scale(${scale})" d="${paths.join('')}" fill="black" shape-rendering="crispEdges"/></svg>`}
-  function piece(s,id){const p=s.pieces.find(p=>p.id===Number(id));if(!p)fail('No existe esa pieza de demostración.');return p}
-  function job(s,id){const j=s.jobs.find(j=>j.id===Number(id));if(!j)fail('No existe ese trabajo de impresión.');return j}
-  function receive(s,face,verdict,kind){
-    if(kind==='disconnect'){s.connection.ready=false;s.connection.status='OFFLINE';s.reconnectAt=Date.now()+900;fault(s,'Desconexión simulada. Revisa la pieza antes de continuar.');return}
-    if(!s.connection.ready)fail('Espera a que el origen simulado esté disponible.');
-    if(kind==='duplicate'){if(s.lastResult)event(s,'DUPLICADO',{sequence:s.lastResult.sequence,message:'Se ignora la repetición; no suma otra cara.'});return}
-    if(face!==1&&face!==2)fail('Cara de prueba inválida.');if(!['OK','NG'].includes(verdict))fail('Resultado de prueba inválido.');
-    s.sequence=(s.sequence+(kind==='gap'?2:1))%32768;
-    const r={sequence:s.sequence,program:face,verdict,time:iso()};
-    event(s,'RX_SIMULADA',{frame:`RT,${String(r.sequence).padStart(5,'0')},${verdict},00000001,00020,${String(face).padStart(3,'0')},01,${verdict},0000100`,message:'Datos ficticios; no hubo conexión TCP'});
-    if(s.lastResult&&(r.sequence-s.lastResult.sequence+32768)%32768!==1)fault(s,'Salto de contador simulado. Revisa el ciclo antes de continuar.');
-    s.lastResult=r;
-    if(!s.cycle||!['FACE1','FACE2'].includes(s.cycle.phase)||s.alarm)return;
-    const expected=s.cycle.phase==='FACE1'?1:2;
-    if(face!==expected){event(s,'CARA_NO_ESPERADA',{expected,program:face});return}
-    if(verdict!=='OK'){s.cycle.phase='REJECTED';event(s,'RECHAZO',{face});return}
-    s.cycle[expected===1?'first':'second']=r;
-    if(expected===1){s.cycle.phase='FACE2';event(s,'CARA_OK',{face:1});return}
-    if(s.pieces.length>=100)fail('La demo llegó a 100 piezas. Descarga tus observaciones y reinicia el escenario.');
-    const serial=`DEMO-${s.station}-${String(s.counter+1).padStart(9,'0')}`,qr=qrPayload(s,serial),image=svg(qr,s.label.width,s.label.height);
-    s.counter++;
-    const p={id:s.counter,serial,origin:'SIM',status:'PENDING',created:iso(),released:null,qr,svg:image,width:s.label.width,height:s.label.height,lot:s.lot.code,lot_id:s.lot.id,part:s.lot.part,shift:s.lot.shift,reprints:0};s.pieces.push(p);
-    const j={id:s.jobs.length+1,piece_id:p.id,purpose:'INITIAL',mode:s.label.printer,status:'PENDING',attempts:0,reason:'',error:'',created:iso(),due:Date.now()+650};s.jobs.push(j);s.cycle.piece_id=p.id;s.cycle.phase='PRINT_PENDING';event(s,'DOS_CARAS_OK',{serial,piece_id:p.id});
+  const a=s.auto;if(!a?.running||Date.now()<a.due||s.alarm)return;
+  if(a.stage==='ARRIVE'){
+   if(s.cycle||!s.lot||s.pieces.length>=100){a.running=false;return}
+   begin(s);a.cycleId=s.cycle.id;a.stage='SIDE1';a.due=Date.now()+1400;return;
   }
-  function run(s,action,data){
-    switch(action){
-      case 'lot.open':{idle(s);const code=String(data.code||'').trim().toUpperCase(),part=data.part,shift=Number(data.shift||1),target=Number(data.target||0);if(!/^[A-Z0-9._/-]{1,32}$/.test(code))fail('Lote: de 1 a 32 letras, números, guiones o diagonales.');if(!parts.some(p=>p.number===part))fail('Selecciona un modelo ficticio de la lista.');if(!(Number.isInteger(shift)&&shift>=1&&shift<=9&&Number.isInteger(target)&&target>=0&&target<=100000))fail('Turno o meta fuera de rango.');if(s.lots.some(l=>l.code===code&&l.part===part))fail('Ese lote ya existe para el modelo. Usa un lote nuevo.');if(s.lot){s.lot.status='CLOSED';s.lots.forEach(l=>{if(l.id===s.lot.id)l.status='CLOSED'});event(s,'CIERRE_LOTE',{lot:s.lot.code})}s.lot={id:s.lots.length+1,code,part,shift,target,status:'OPEN',origin:'SIM',created:iso()};s.lots.push(s.lot);event(s,'APERTURA_LOTE',{lot:code,part});break}
-      case 'lot.close':idle(s);if(!s.lot)fail('No hay un lote abierto.');s.lot.status='CLOSED';s.lots.forEach(l=>{if(l.id===s.lot.id)l.status='CLOSED'});event(s,'CIERRE_LOTE',{lot:s.lot.code});s.lot=null;break;
-      case 'piece.begin':{idle(s);if(!s.connection.ready)fail('Espera al origen simulado.');if(s.alarm)fail('Revisa y reconoce primero la alerta.');if(!s.lot)fail('Abre un lote primero.');svg(qrPayload(s,'DEMO-FFFFFF-000000001'),s.label.width,s.label.height);s.cycle={id:'CICLO-'+Date.now(),phase:'FACE1',first:null,second:null,armed:true,binding:'PROGRAMS',created:iso(),piece_id:null};event(s,'INICIO_PIEZA');break}
-      case 'piece.cancel':if(!s.cycle)fail('No hay una pieza en curso.');if(s.cycle.piece_id)fail('La pieza ya tiene serial: resuelve su etiqueta con el mismo serial.');if(!String(data.reason||'').trim())fail('Escribe el motivo.');event(s,'CANCELACION_PIEZA',{reason:String(data.reason).slice(0,200)});s.cycle=null;break;
-      case 'alert.ack':idle(s);if(!s.connection.ready)fail('Espera a que se restablezca el origen simulado.');s.alarm='';event(s,'ALERTA_REVISADA');break;
-      case 'sim':receive(s,Number(data.face||1),data.verdict||'OK',data.kind||'result');break;
-      case 'printer.fail':if(s.label.printer!=='SIMULATED')fail('La falla se usa con impresora simulada.');s.failNext=true;event(s,'FALLA_PROGRAMADA');break;
-      case 'printer.retry':{const j=job(s,data.job_id);if(j.status!=='ERROR')fail('No hay un trabajo fallido para reintentar.');j.status='PENDING';j.error='';j.due=Date.now()+650;if(s.cycle&&s.cycle.piece_id===j.piece_id)s.cycle.phase='PRINT_PENDING';event(s,'REINTENTO',{job_id:j.id,piece_id:j.piece_id});break}
-      case 'printer.confirm':{const j=job(s,data.job_id);if(!['READY_SIM','READY_BROWSER'].includes(j.status))fail('La etiqueta todavía no está lista para confirmar.');const p=piece(s,j.piece_id);if(j.purpose==='INITIAL'){if(!s.cycle||s.cycle.piece_id!==p.id)fail('La etiqueta no corresponde al ciclo.');p.status='RELEASED';p.released=iso();s.cycle=null}j.status='CONFIRMED';event(s,'ETIQUETA_CONFIRMADA',{piece_id:p.id,purpose:j.purpose});break}
-      case 'printer.reprint':{idle(s);const p=piece(s,data.piece_id);if(p.status!=='RELEASED')fail('La pieza no está terminada.');if(!String(data.reason||'').trim())fail('Escribe el motivo de reimpresión.');s.jobs.push({id:s.jobs.length+1,piece_id:p.id,purpose:'REPRINT',mode:s.label.printer,status:'PENDING',attempts:0,reason:String(data.reason).slice(0,200),error:'',created:iso(),due:Date.now()+650});p.reprints++;event(s,'REIMPRESION',{piece_id:p.id,serial:p.serial,reason:String(data.reason).slice(0,200)});break}
-      case 'label.save':{idle(s);if(!['SIMULATED','BROWSER'].includes(data.printer))fail('Salida de impresión inválida.');const sample=JSON.stringify({serie:'DEMO-FFFFFF-000000001',parte:parts[0].number,lote:'X'.repeat(32),fecha:iso(),turno:1,origen:'DEMO_WEB',prueba:true});svg(sample,data.width,data.height);s.label={width:Number(data.width),height:Number(data.height),printer:data.printer};event(s,'CONFIG_ETIQUETA');break}
-      case 'connect':idle(s);if(data.mode!=='SIM')fail('La conexión a una cámara por IP se prueba con la aplicación instalada.');s.connection.status='ONLINE';s.connection.ready=true;s.alarm='';s.reconnectAt=null;event(s,'ORIGEN_SIMULADO');break;
-      case 'disconnect':s.connection.status='OFFLINE';s.connection.ready=false;fault(s,'Origen simulado detenido. Revisa el ciclo y vuelve a activar la demo.');break;
-      default:fail('Acción no disponible en la demostración web.');
-    }
+  if(!s.cycle||a.cycleId!==s.cycle.id){a.running=false;return}
+  if(a.stage==='SIDE1'){
+   if(s.scenario==='DISCONNECT'){s.connection.ready=false;block(s,'Comunicación con cámara interrumpida. Se conservan las validaciones de esta pieza.');return}
+   receive(s,1,'OK',a.cycleId);a.stage='SIDE2';a.due=Date.now()+1600;return;
   }
-  function snapshot(s){const j=pending(s),last=j?piece(s,j.piece_id):s.pieces.at(-1)||null;const start=new Date();start.setMinutes(0,0,0);start.setHours(start.getHours()-7);const hourly=Array.from({length:8},(_,i)=>({hour:String(new Date(start.getTime()+i*3600000).getHours()).padStart(2,'0')+':00',count:0}));for(const p of s.pieces)if(p.released){const i=Math.floor((new Date(p.released)-start)/3600000);if(i>=0&&i<8)hourly[i].count++}return copy({version:'3.0.0-web',mode:'SIM',parts,connection:s.connection,camera:{ip:'',port:8500,binding:'PROGRAMS',programs:{}},label:s.label,cycle:s.cycle,alarm:s.alarm,lot:s.lot,lot_suggestion:'LOTE-DEMO-'+String(s.lots.length+1).padStart(3,'0'),pending_job:j?{...j,serial:piece(s,j.piece_id).serial}:null,last_piece:last,metrics:{completed:s.pieces.filter(p=>p.status==='RELEASED').length,validated:s.pieces.length,lot_completed:s.pieces.filter(p=>p.status==='RELEASED'&&s.lot&&p.lot_id===s.lot.id).length,pending:j?1:0},hourly,pieces:s.pieces.slice().reverse(),events:s.events,fail_next:s.failNext,can_undo:storage?Boolean(storage.getItem(BACKUP)):false,persistent:Boolean(storage)})}
-  let serial=Promise.resolve();
-  function exclusive(fn){const next=serial.then(()=>{const s=load();tick(s);const result=fn(s);save(s);return result});serial=next.catch(()=>{});return next}
-  const urlCache=new Map();
-  function pieceUrl(id,print){const s=load(),p=piece(s,id),key=id+(print?'-print':'-svg')+'-'+p.serial;if(urlCache.has(key))return urlCache.get(key);let data=p.svg,type='image/svg+xml';if(print){type='text/html';data=`<!doctype html><html lang="es"><meta charset="utf-8"><title>QR de demostración</title><style>body{font:14px system-ui;margin:30px}.qr{width:${p.width}mm;height:${p.height}mm;margin-top:20px}.qr svg{display:block;width:100%;height:100%}@page{size:${p.width}mm ${p.height}mm;margin:0}@media print{html,body{margin:0;padding:0}.no-print{display:none}.qr{margin:0}}</style><div class="no-print"><h1>Etiqueta de prueba · solo QR</h1><p>Usa escala 100 %, sin encabezados ni pies.</p><button onclick="window.print()">Imprimir / guardar PDF</button></div><div class="qr">${p.svg}</div></html>`}const url=URL.createObjectURL(new Blob([data],{type}));urlCache.set(key,url);return url}
-  function download(name,data,type='text/plain;charset=utf-8'){const url=URL.createObjectURL(new Blob([data],{type}));const link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}
-  global.CamaraIABridge={
-    state:()=>exclusive(s=>snapshot(s)),
-    command:(action,data={})=>exclusive(s=>{run(s,action,data);return {accepted:action}}),
-    svgUrl:id=>pieceUrl(id,false),printUrl:id=>pieceUrl(id,true),
-    exportCsv(){const s=load(),fields=['serial','part','lot','shift','created','released','status','origin','qr'];const quote=x=>'"'+String(x??'').replace(/"/g,'""')+'"';download('CamaraIA_demo.csv','\ufeff'+[fields.join(','),...s.pieces.map(p=>fields.map(k=>quote(p[k])).join(','))].join('\r\n'),'text/csv;charset=utf-8')},
-    reset:()=>exclusive(s=>{if(storage)storage.setItem(BACKUP,JSON.stringify(s));const n=fresh();Object.keys(s).forEach(k=>delete s[k]);Object.assign(s,n);for(const u of urlCache.values())URL.revokeObjectURL(u);urlCache.clear();event(s,'NUEVO_ESCENARIO',{message:'Demostración reiniciada con datos ficticios nuevos.'});return true}),
-    undo:()=>exclusive(s=>{if(!storage||!storage.getItem(BACKUP))fail('No hay un reinicio para deshacer.');const old=JSON.parse(storage.getItem(BACKUP));Object.keys(s).forEach(k=>delete s[k]);Object.assign(s,old);storage.removeItem(BACKUP);urlCache.forEach(u=>URL.revokeObjectURL(u));urlCache.clear();return true}),
-    review(){try{return storage?JSON.parse(storage.getItem(REVIEW)||'null'):memoryReview}catch(e){return null}},
-    saveReview(data){const r={version:'3.0.0-web',date:iso(),flow:data.flow,checks:data.checks,comments:String(data.comments||'').slice(0,5000),type:'COMENTARIOS_DE_REVISION_NO_FIRMA'};if(storage)storage.setItem(REVIEW,JSON.stringify(r));else memoryReview=r;return r},
-    downloadReview(data){const r=this.saveReview(data),s=load();const lines=['CAMARAIA · REVISIÓN DEL FLUJO','Demo v3.0.0 · datos ficticios','Fecha: '+r.date,'Opinión: '+r.flow,'','Pasos revisados:',...r.checks.map(x=>'[x] '+x),'','Observaciones:',r.comments||'(Sin observaciones)','',`Piezas de prueba terminadas: ${s.pieces.filter(p=>p.status==='RELEASED').length}`,'','Este archivo contiene comentarios sobre la demostración.','La recepción por cámara y la impresión física se validan después en la PC de prueba.','Compártelo con la persona que te envió la demo.'];download('Revision_CamaraIA.txt','\ufeff'+lines.join('\r\n'));return r},
-    // Superficie de pruebas del motor; no contiene acceso a hardware ni servicios.
-    _testing:{fresh,run,tick,snapshot,svg,load,save,parts}
-  };
+  if(a.stage==='SIDE2'){
+   if(s.scenario==='WAIT_SIDE2'&&a.waits<2){event(s,'ESPERANDO_LADO2',{message:'Todavía no llega el OK del lado 2; el primer OK permanece.'});a.waits++;a.due=Date.now()+1400;return}
+   receive(s,2,'OK',a.cycleId);a.stage='WAIT_PRINT';a.due=Date.now()+700;return;
+  }
+  if(a.stage==='WAIT_PRINT'){
+   if(s.cycle.phase==='COMPLETE'){a.stage='EXIT';a.due=Date.now()+2000}else a.due=Date.now()+200;return;
+  }
+  if(a.stage==='EXIT'){
+   depart(s,a.cycleId);a.remaining--;a.waits=0;
+   if(a.remaining>0){a.stage='ARRIVE';a.due=Date.now()+800}else{a.stage='FINISHED';a.running=false;event(s,'FIN_DE_EJEMPLO',{message:'Secuencia de demostración terminada. La estación real continúa al detectar otra pieza.'})}
+  }
+ }
+ function openLot(s,data){idle(s);const code=String(data.code||'').trim().toUpperCase(),part=data.part,shift=Number(data.shift||1),target=Number(data.target||770);if(!/^[A-Z0-9./-]{1,24}$/.test(code))fail('El lote debe tener 1–24 letras, números, puntos, guiones o diagonales.');if(!parts.some(p=>p.number===part))fail('Selecciona un número de parte del cliente.');if(!(Number.isInteger(shift)&&shift>=1&&shift<=9&&Number.isInteger(target)&&target>=1&&target<=100000))fail('Turno o meta fuera de rango.');if(s.lots.some(l=>l.code===code&&l.part===part))fail('Ese lote ya fue abierto para esta parte.');if(s.lot){s.lots.find(l=>l.id===s.lot.id).status='CLOSED';event(s,'CIERRE_LOTE',{lot:s.lot.code})}s.lot={id:s.lots.length+1,code,part,shift,target,status:'OPEN',created:iso()};s.lots.push(clone(s.lot));s.lastCycle=null;event(s,'APERTURA_LOTE',{code,part,shift})}
+ function command(s,action,data={}){
+  if(['printer.reprint','printer.retry','printer.confirm','label.print','print','piece.approve','station.next','piece.begin','piece.arm'].includes(action))fail('El operador no inicia ni confirma inspecciones o impresiones. Se recibe la terminación automática de ambos lados y se emite una sola etiqueta.');
+  switch(action){
+   case 'lot.open':openLot(s,data);s.auto={running:true,stage:'ARRIVE',due:Date.now()+800,remaining:3,waits:0};break;
+   case 'lot.close':idle(s);if(!s.lot)fail('No hay lote abierto.');s.lots.find(l=>l.id===s.lot.id).status='CLOSED';event(s,'CIERRE_LOTE',{lot:s.lot.code});s.lot=null;s.auto.running=false;break;
+   case 'demo.play':idle(s);if(s.alarm)fail('Hay una incidencia de impresión pendiente.');s.auto={running:true,stage:'ARRIVE',due:Date.now()+400,remaining:3,waits:0};break;
+   case 'demo.pause':s.auto.running=false;break;
+   case 'demo.resume':if(s.alarm)fail('La pieza está retenida por una incidencia.');s.auto.running=true;s.auto.due=Date.now()+500;break;
+   case 'demo.scenario':idle(s);if(!['OK','WAIT_SIDE2','PRINT_ERROR','DISCONNECT'].includes(data.scenario))fail('Escenario inválido.');s.scenario=data.scenario;event(s,'ESCENARIO',{scenario:s.scenario});break;
+   case 'source.present':begin(s);break;
+   case 'source.depart':depart(s,data.cycle_id);break;
+   case 'source.result':if(![1,2].includes(data.face)||!['OK','NG'].includes(data.verdict))fail('Resultado inválido.');receive(s,data.face,data.verdict,data.cycle_id,data.sequence);break;
+   default:fail('Acción no disponible en esta demostración.');
+  }
+ }
+ function snapshot(s){const j=activeJob(s),p=s.cycle?(s.cycle.piece_id?findPiece(s,s.cycle.piece_id):null):s.pieces.at(-1)||null,start=new Date();start.setMinutes(0,0,0);start.setHours(start.getHours()-7);const hourly=Array.from({length:8},(_,i)=>({hour:String(new Date(start.getTime()+i*3600000).getHours()).padStart(2,'0')+':00',count:0}));for(const p of s.pieces)if(p.released){const i=Math.floor((new Date(p.released)-start)/3600000);if(i>=0&&i<8)hourly[i].count++}return clone({version:'4.0.0',parts,connection:s.connection,lot:s.lot,lot_suggestion:suggest(s),cycle:s.cycle,last_cycle:s.lastCycle,pending_job:j,last_piece:p,scenario:s.scenario,label:s.label,alarm:s.alarm,pieces:s.pieces.slice().reverse(),events:s.events,hourly,playback:s.auto,metrics:{completed:s.pieces.filter(p=>p.status==='RELEASED').length,validated:s.pieces.length,lot_completed:s.pieces.filter(p=>p.status==='RELEASED'&&p.lot_id===s.lot?.id).length,retained:s.cycle&&['PRINT_FAILED','RETAINED'].includes(s.cycle.phase)?1:0},persistent:!!storage,can_undo:storage?!!storage.getItem(BACKUP):false,capacity:{pieces_per_lot:770,lots:9,labels:6930,reserve_10_percent:7623,rolls_5000:2,total_stock:10000}})}
+ let queue=Promise.resolve();
+ function exclusive(fn){const task=queue.then(()=>{const s=load();tick(s);const result=fn(s);save(s);return result});queue=task.catch(()=>{});return task}
+ const urls=new Map();
+ function svgUrl(id){const p=findPiece(load(),id);if(p.status!=='RELEASED')fail('No hay una etiqueta emitida para esta pieza.');if(!urls.has(p.label_serial))urls.set(p.label_serial,URL.createObjectURL(new Blob([p.svg],{type:'image/svg+xml'})));return urls.get(p.label_serial)}
+ function download(name,text,type='text/plain;charset=utf-8'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}
+ global.CamaraIABridge={
+  state:()=>exclusive(snapshot),command:(a,d)=>exclusive(s=>{command(s,a,d);return {accepted:a}}),svgUrl,
+  exportCsv(){const s=load(),columns=['serial','label_serial','part','lot','shift','status','cycle_id','created','released','qr'];const q=x=>'"'+String(x??'').replace(/"/g,'""')+'"';download('CamaraIA_control_calidad.csv','\ufeff'+[columns.join(','),...s.pieces.map(p=>columns.map(k=>q(p[k])).join(','))].join('\r\n'),'text/csv;charset=utf-8')},
+  reset:()=>exclusive(s=>{if(storage)storage.setItem(BACKUP,JSON.stringify(s));Object.keys(s).forEach(k=>delete s[k]);Object.assign(s,fresh());urls.forEach(u=>URL.revokeObjectURL(u));urls.clear();return true}),
+  undo:()=>exclusive(s=>{if(!storage||!storage.getItem(BACKUP))fail('No hay un reinicio para deshacer.');const old=JSON.parse(storage.getItem(BACKUP));Object.keys(s).forEach(k=>delete s[k]);Object.assign(s,old);storage.removeItem(BACKUP);urls.forEach(u=>URL.revokeObjectURL(u));urls.clear();return true}),
+  review(){try{return storage?JSON.parse(storage.getItem(REVIEW)||'null'):memoryReview}catch(e){return null}},
+  saveReview(data){const r={version:'4.0.0',date:iso(),flow:data.flow,checks:data.checks||[],comments:String(data.comments||'').slice(0,5000),type:'COMENTARIOS_DE_REVISION_NO_FIRMA'};if(storage)storage.setItem(REVIEW,JSON.stringify(r));else memoryReview=r;return r},
+  downloadReview(data){const r=this.saveReview(data);download('Revision_CamaraIA.txt','\ufeff'+['CAMARAIA · REVISIÓN DEL FLUJO AUTOMÁTICO','Versión 4.0.0','Fecha: '+r.date,'Opinión: '+r.flow,'','Revisado:',...r.checks.map(x=>'[x] '+x),'','Observaciones:',r.comments||'(Sin observaciones)','', 'Una etiqueta por ciclo validado. No se permiten reimpresiones.','Las incidencias de impresión retienen la pieza. No hay reimpresión ni reinicio de caras; recuperación por aprobar.','Series de pieza y etiqueta diferenciadas: propuesta pendiente de confirmar.'].join('\r\n'));return r},
+  _testing:{fresh,load,save,begin,receive,depart,tick,command,snapshot,layout,encode,dataFor,parts,suggest}
+ };
 })(typeof window!=='undefined'?window:globalThis);
