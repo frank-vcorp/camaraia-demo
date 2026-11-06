@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "purpose": "product-studio-demo-publication",
-  "source_commit": "687c307708c920b1a77621e071eec452660279a6",
+  "source_commit": "401d3dd4931fccffda825c9329ce3aea385e2421",
   "source_repository": "frank-vcorp/camaraia-product",
-  "published_at": "2026-11-06T15:46:31.890Z",
+  "published_at": "2026-11-06T15:49:59.059Z",
   "asset_paths": [
     "docs/index.html",
     "docs/style.css",
